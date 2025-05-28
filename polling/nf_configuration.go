@@ -6,6 +6,7 @@
 package polling
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,7 +49,10 @@ func PollNetworkConfig() {
 
 func fetchPlmnConfig() ([]models.PlmnId, error) {
 	pollingEndpoint := factory.AusfConfig.Configuration.WebuiUri + POLLING_PATH
-	resp, err := http.Get(pollingEndpoint)
+
+	client := getHttpClient()
+	resp, err := client.Get(pollingEndpoint)
+
 	if err != nil {
 		return nil, fmt.Errorf("HTTP GET failed: %w", err)
 	}
@@ -67,17 +71,23 @@ func fetchPlmnConfig() ([]models.PlmnId, error) {
 	return config, nil
 }
 
-func handlePolledPlmnConfig(context *context.AUSFContext, newPlmnConfig []models.PlmnId) {
-	if !reflect.DeepEqual(context.PlmnList, newPlmnConfig) {
-		context.PlmnList = newPlmnConfig
-		if len(newPlmnConfig) == 0 {
-			logger.PollConfigLog.Infoln("received empty PLMN ID list")
-			go nrfregistration.DeregisterNF()
-		} else {
-			logger.PollConfigLog.Infoln("PLMN config changed")
-			go nrfregistration.RegisterNF()
-		}
+func getHttpClient() *http.Client {
+	customTransport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
 	}
+	return &http.Client{Transport: customTransport}
+}
+
+func handlePolledPlmnConfig(context *context.AUSFContext, newPlmnConfig []models.PlmnId) {
+	if reflect.DeepEqual(context.PlmnList, newPlmnConfig) {
+		logger.PollConfigLog.Debugln("PLMN config did not change")
+		return
+	}
+	context.PlmnList = newPlmnConfig
+	logger.PollConfigLog.Infoln("PLMN config changed %v", context.PlmnList)
+	nrfregistration.HandleNewConfig(context.PlmnList)
 }
 
 func minDuration(a, b time.Duration) time.Duration {

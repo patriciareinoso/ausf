@@ -9,11 +9,12 @@
 package nrfregistration
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/omec-project/ausf/consumer"
-	"github.com/omec-project/ausf/context"
+	ausfContext "github.com/omec-project/ausf/context"
 	"github.com/omec-project/ausf/logger"
 	"github.com/omec-project/openapi/models"
 )
@@ -21,6 +22,12 @@ import (
 var (
 	KeepAliveTimer      *time.Timer
 	KeepAliveTimerMutex sync.Mutex
+)
+
+var (
+	registerCtx      context.Context
+	registerCancel   context.CancelFunc
+	registerCtxMutex sync.Mutex
 )
 
 const DEFAULT_HEARTBEAT_TIMER int32 = 60
@@ -33,8 +40,8 @@ func startKeepAliveTimer(nfProfile models.NfProfile) {
 	if nfProfile.HeartBeatTimer != 0 {
 		heartbeatTimer = nfProfile.HeartBeatTimer
 	}
-	// AfterFunc starts timer and waits for KeepAliveTimer to elapse and then calls UpdateNF function
-	KeepAliveTimer = time.AfterFunc(time.Duration(heartbeatTimer)*time.Second, UpdateNF)
+	// AfterFunc starts timer and waits for KeepAliveTimer to elapse and then calls updateNF function
+	KeepAliveTimer = time.AfterFunc(time.Duration(heartbeatTimer)*time.Second, updateNF)
 	logger.NrfRegistrationLog.Infof("started KeepAlive Timer: %v sec", heartbeatTimer)
 }
 
@@ -47,90 +54,121 @@ func stopKeepAliveTimer() {
 }
 
 func buildAndSendRegisterNFInstance() (models.NfProfile, error) {
-	self := context.GetSelf()
+	self := ausfContext.GetSelf()
 	profile, err := consumer.BuildNFInstance(self)
 	if err != nil {
 		logger.NrfRegistrationLog.Errorf("build AUSF Profile Error: %v", err)
 		return profile, err
 	}
 	logger.NrfRegistrationLog.Infof("AUSF Profile Registering to NRF: %v", profile)
-	// Indefinite attempt to register until success
 	profile, _, self.NfId, err = consumer.SendRegisterNFInstance(self.NrfUri, self.NfId, profile)
 	return profile, err
 }
 
-// UpdateNF is the callback function, this is called when keepalivetimer elapsed
-func UpdateNF() {
+// updateNF is the callback function, this is called when keepalivetimer elapsed
+func updateNF() {
 	KeepAliveTimerMutex.Lock()
 	defer KeepAliveTimerMutex.Unlock()
+
 	if KeepAliveTimer == nil {
-		logger.NrfRegistrationLog.Warnln("KeepAlive timer has been stopped") ////////
+		logger.NrfRegistrationLog.Warnln("KeepAlive timer has been stopped")
 		return
 	}
-	// setting default value 60 sec
-	heartBeatTimer := DEFAULT_HEARTBEAT_TIMER
-	pitem := models.PatchItem{
-		Op:    "replace",
-		Path:  "/nfStatus",
-		Value: "REGISTERED",
+
+	patchItem := []models.PatchItem{
+		{
+			Op:    "replace",
+			Path:  "/nfStatus",
+			Value: "REGISTERED",
+		},
 	}
-	var patchItem []models.PatchItem
-	patchItem = append(patchItem, pitem)
 	nfProfile, problemDetails, err := consumer.SendUpdateNFInstance(patchItem)
-	if problemDetails != nil {
-		logger.NrfRegistrationLog.Errorf("AUSF update to NRF ProblemDetails[%v]", problemDetails)
-		// 5xx response from NRF, 404 Not Found, 400 Bad Request
-		if (problemDetails.Status/100) == 5 ||
-			problemDetails.Status == 404 || problemDetails.Status == 400 {
-			// register with NRF full profile
-			nfProfile, err = buildAndSendRegisterNFInstance()
-			if err != nil {
-				logger.NrfRegistrationLog.Errorf("AUSF register to NRF Error[%s]", err.Error())
-			}
-		}
-	} else if err != nil {
-		logger.NrfRegistrationLog.Errorf("AUSF update to NRF Error[%s]", err.Error())
+
+	if shouldRegister(problemDetails, err) {
 		nfProfile, err = buildAndSendRegisterNFInstance()
 		if err != nil {
 			logger.NrfRegistrationLog.Errorf("AUSF register to NRF Error[%s]", err.Error())
 		}
 	}
 
+	heartBeatTimer := DEFAULT_HEARTBEAT_TIMER
 	if nfProfile.HeartBeatTimer != 0 {
 		heartBeatTimer = nfProfile.HeartBeatTimer
 	}
-	logger.NrfRegistrationLog.Debugf("restarted KeepAlive Timer: %v sec", heartBeatTimer)
 	// restart timer with received HeartBeatTimer value
-	KeepAliveTimer = time.AfterFunc(time.Duration(heartBeatTimer)*time.Second, UpdateNF)
+	KeepAliveTimer = time.AfterFunc(time.Duration(heartBeatTimer)*time.Second, updateNF)
+	logger.NrfRegistrationLog.Debugf("restarted KeepAlive Timer: %v sec", heartBeatTimer)
 }
 
-func RegisterNF() {
-	self := context.GetSelf()
-	profile, err := consumer.BuildNFInstance(self)
-	if err != nil {
-		logger.NrfRegistrationLog.Errorln("build AUSF Profile Error")
+func shouldRegister(problemDetails *models.ProblemDetails, err error) bool {
+	if problemDetails != nil {
+		logger.NrfRegistrationLog.Warnf("AUSF update to NRF ProblemDetails[%v]", problemDetails)
+		status := problemDetails.Status
+		return (status/100) == 5 || status == 404 || status == 400
 	}
-	var prof models.NfProfile
-	prof, _, self.NfId, err = consumer.SendRegisterNFInstance(self.NrfUri, self.NfId, profile)
 	if err != nil {
-		logger.NrfRegistrationLog.Errorf("AUSF register to NRF Error[%s]", err.Error())
-	} else {
-		startKeepAliveTimer(prof)
-		logger.CfgLog.Infoln("sent Register NF Instance with updated profile")
+		logger.NrfRegistrationLog.Warnf("AUSF update to NRF Error[%s]", err.Error())
+		return true
+	}
+	return false
+}
+
+func registerNF(ctx context.Context) {
+	// should stop heartbeat?
+	for {
+		select {
+		case <-ctx.Done():
+			logger.PollConfigLog.Infoln("register AUSF instance to NRF cancelled due to new configuration")
+			return
+		default:
+			ausfContext := ausfContext.GetSelf()
+			profile, err := consumer.BuildNFInstance(ausfContext)
+			if err != nil {
+				logger.NrfRegistrationLog.Warnln("build AUSF profile failed", err)
+			}
+			profile, _, ausfContext.NfId, err = consumer.SendRegisterNFInstance(ausfContext.NrfUri, ausfContext.NfId, profile)
+			if err != nil {
+				logger.NrfRegistrationLog.Errorf("register AUSF instance to NRF error[%s]", err.Error())
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			logger.CfgLog.Infoln("register AUSF instance to NRF with updated profile succeeded")
+			startKeepAliveTimer(profile)
+		}
 	}
 }
 
-func DeregisterNF() {
+func deregisterNF() {
 	KeepAliveTimerMutex.Lock()
 	stopKeepAliveTimer()
 	KeepAliveTimerMutex.Unlock()
 	problemDetails, err := consumer.SendDeregisterNFInstance()
-	if problemDetails != nil {
-		logger.NrfRegistrationLog.Errorf("deregister Instance to NRF failed, Problem: [+%v]", problemDetails)
-	}
 	if err != nil {
-		logger.NrfRegistrationLog.Errorf("deregister Instance to NRF Error[%s]", err.Error())
+		logger.NrfRegistrationLog.Warnln("deregister instance from NRF failed", err.Error())
 		return
 	}
-	logger.NrfRegistrationLog.Infoln("deregister from NRF successfully")
+	if problemDetails != nil {
+		logger.NrfRegistrationLog.Warnln("deregister instance from NRF failed", problemDetails)
+		return
+	}
+	logger.NrfRegistrationLog.Infoln("deregister instance from NRF successful")
+}
+
+var HandleNewConfig = func(newPlmnConfig []models.PlmnId) {
+	registerCtxMutex.Lock()
+	defer registerCtxMutex.Unlock()
+
+	if registerCancel != nil {
+		registerCancel()
+	}
+
+	if len(newPlmnConfig) == 0 {
+		logger.PollConfigLog.Debugln("PLMN config is empty")
+		deregisterNF()
+	} else {
+		logger.PollConfigLog.Debugln("PLMN config is not empty")
+		// Create new cancellable context for this registration
+		registerCtx, registerCancel = context.WithCancel(context.Background())
+		go registerNF(registerCtx)
+	}
 }

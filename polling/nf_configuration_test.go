@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 /*
- * NF Polling Unit Testcases
+ * NF Polling Unit Tests
  *
  */
 
@@ -19,57 +19,84 @@ import (
 
 	"github.com/omec-project/ausf/context"
 	"github.com/omec-project/ausf/factory"
+	"github.com/omec-project/ausf/nrfregistration"
 	"github.com/omec-project/openapi/models"
 )
 
 func TestHandlePolledPlmnConfig_UpdateConfig(t *testing.T) {
-	context := &context.AUSFContext{
-		PlmnList: []models.PlmnId{
-			{Mcc: "001", Mnc: "01"},
+
+	testCases := []struct {
+		name          string
+		newPlmnConfig []models.PlmnId
+	}{
+		{
+			name:          "ConfigChanged",
+			newPlmnConfig: []models.PlmnId{{Mcc: "001", Mnc: "02"}},
+		},
+		{
+			name:          "EmptyConfig",
+			newPlmnConfig: []models.PlmnId{},
 		},
 	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
 
-	newConfig := []models.PlmnId{
-		{Mcc: "001", Mnc: "02"},
-	}
+			originalFunction := nrfregistration.HandleNewConfig
+			called := false
+			nrfregistration.HandleNewConfig = func(newPlmnConfig []models.PlmnId) { called = true }
+			defer func() { nrfregistration.HandleNewConfig = originalFunction }()
 
-	handlePolledPlmnConfig(context, newConfig)
+			context := &context.AUSFContext{
+				PlmnList: []models.PlmnId{{Mcc: "001", Mnc: "01"}}}
 
-	if !reflect.DeepEqual(context.PlmnList, newConfig) {
-		t.Errorf("Expected PLMN config to be updated to %v, got %v", newConfig, context.PlmnList)
-	}
-}
+			handlePolledPlmnConfig(context, tc.newPlmnConfig)
 
-func TestHandlePolledPlmnConfig_EmptyList(t *testing.T) {
-	context := &context.AUSFContext{
-		PlmnList: []models.PlmnId{{Mcc: "001", Mnc: "01"}},
-	}
-
-	newConfig := []models.PlmnId{}
-
-	handlePolledPlmnConfig(context, newConfig)
-
-	if len(context.PlmnList) != 0 {
-		t.Errorf("Expected empty PLMN config, go %v", context.PlmnList)
+			if !reflect.DeepEqual(context.PlmnList, tc.newPlmnConfig) {
+				t.Errorf("Expected PLMN config to be updated to %v, got %v", tc.newPlmnConfig, context.PlmnList)
+			}
+			if !called {
+				t.Error("Expected nrfregistration.HandleNewConfig to be called")
+			}
+		})
 	}
 }
 
 func TestHandlePolledPlmnConfig_ConfigDidNotChanged(t *testing.T) {
-	original := []models.PlmnId{
-		{Mcc: "001", Mnc: "01"},
-	}
-	context := &context.AUSFContext{
-		PlmnList: original,
-	}
 
-	newConfig := []models.PlmnId{
-		{Mcc: "001", Mnc: "01"},
+	testCases := []struct {
+		name          string
+		newPlmnConfig []models.PlmnId
+	}{
+		{
+			name:          "SameConfig",
+			newPlmnConfig: []models.PlmnId{{Mcc: "001", Mnc: "02"}},
+		},
+		{
+			name:          "EmptyConfig",
+			newPlmnConfig: []models.PlmnId{},
+		},
 	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
 
-	handlePolledPlmnConfig(context, newConfig)
+			originalFunction := nrfregistration.HandleNewConfig
+			called := false
+			nrfregistration.HandleNewConfig = func(newPlmnConfig []models.PlmnId) { called = true }
+			defer func() { nrfregistration.HandleNewConfig = originalFunction }()
 
-	if !reflect.DeepEqual(context.PlmnList, original) {
-		t.Errorf("Expected PLMN list to remain unchanged, got %v", context.PlmnList)
+			context := &context.AUSFContext{
+				PlmnList: tc.newPlmnConfig}
+
+			handlePolledPlmnConfig(context, tc.newPlmnConfig)
+
+			if !reflect.DeepEqual(context.PlmnList, tc.newPlmnConfig) {
+				t.Errorf("Expected PLMN list to remain unchanged, got %v", context.PlmnList)
+			}
+
+			if called {
+				t.Error("Expected nrfregistration.HandleNewConfig not to be called")
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@
 package nrfregistration
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -43,7 +44,7 @@ func TestRegisterNF(t *testing.T) {
 		return prof, nil, nil
 	}
 
-	go RegisterNF()
+	go registerNF(context.TODO())
 	time.Sleep(5 * time.Second)
 	assert.Equal(t, KeepAliveTimer != nil, true)
 

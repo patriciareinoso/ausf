@@ -88,7 +88,7 @@ func (ausf *AUSF) Initialize(c *cli.Context) error {
 	} else {
 		go func() {
 			logger.InitLog.Infoln("use helm chart config")
-			nrfregistration.RegisterNF()
+			nrfregistration.HandleNewConfig(factory.AusfConfig.Configuration.PlmnSupportList)
 		}()
 	}
 	return nil

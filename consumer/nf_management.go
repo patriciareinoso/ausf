@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	ausfContext "github.com/omec-project/ausf/context"
 	"github.com/omec-project/ausf/logger"
@@ -38,46 +37,38 @@ func BuildNFInstance(ausfContext *ausfContext.AUSFContext) (profile models.NfPro
 	return
 }
 
-// func SendRegisterNFInstance(nrfUri, nfInstanceId string, profile models.NfProfile) (resouceNrfUri string,
-//
-//	retrieveNfInstanceID string, err error) {
 var SendRegisterNFInstance = func(nrfUri, nfInstanceId string, profile models.NfProfile) (prof models.NfProfile, resourceNrfUri string, retrieveNfInstanceId string, err error) {
 	configuration := Nnrf_NFManagement.NewConfiguration()
 	configuration.SetBasePath(nrfUri)
 	client := Nnrf_NFManagement.NewAPIClient(configuration)
 
-	var res *http.Response
-	for {
-		if profile1, resTmp, err := client.NFInstanceIDDocumentApi.RegisterNFInstance(context.TODO(), nfInstanceId,
-			profile); err != nil || resTmp == nil {
-			logger.ConsumerLog.Errorf("AUSF register to NRF Error[%v]", err)
-			time.Sleep(2 * time.Second)
-			continue
-		} else {
-			res = resTmp
-			prof = profile1
-		}
-		defer func() {
-			if resCloseErr := res.Body.Close(); resCloseErr != nil {
-				logger.ConsumerLog.Errorf("AUSF NFInstanceIDDocumentApi response body cannot close: %+v", resCloseErr)
-			}
-		}()
-		status := res.StatusCode
-		if status == http.StatusOK {
-			// NFUpdate
-			break
-		} else if status == http.StatusCreated {
-			// NFRegister
-			resourceUri := res.Header.Get("Location")
-			resourceNrfUri = resourceUri[:strings.Index(resourceUri, "/nnrf-nfm/")]
-			retrieveNfInstanceId = resourceUri[strings.LastIndex(resourceUri, "/")+1:]
-			return prof, resourceNrfUri, retrieveNfInstanceId, nil
-		} else {
-			logger.ConsumerLog.Errorf("handler returned wrong status code %d", status)
-			logger.ConsumerLog.Errorf("NRF return wrong status code %d", status)
-		}
+	prof, res, err := client.NFInstanceIDDocumentApi.RegisterNFInstance(context.TODO(), nfInstanceId, profile)
+
+	if err != nil || res == nil {
+		logger.ConsumerLog.Errorf("AUSF register to NRF Error[%v]", err)
+		return prof, "", "", err
 	}
-	return prof, "", "", nil
+
+	defer func() {
+		if resCloseErr := res.Body.Close(); resCloseErr != nil {
+			logger.ConsumerLog.Errorf("AUSF NFInstanceIDDocumentApi response body cannot close: %+v", resCloseErr)
+		}
+	}()
+
+	switch res.StatusCode {
+	case http.StatusOK: // NFUpdate
+		logger.ConsumerLog.Debugln("AUSF NF profile updated with complete replacement")
+		return prof, "", "", nil
+	case http.StatusCreated: // NFRegister
+		resourceUri := res.Header.Get("Location")
+		resourceNrfUri = resourceUri[:strings.Index(resourceUri, "/nnrf-nfm/")]
+		retrieveNfInstanceId = resourceUri[strings.LastIndex(resourceUri, "/")+1:]
+		logger.ConsumerLog.Debugln("AUSF NF profile registered to the NRF")
+		return prof, resourceNrfUri, retrieveNfInstanceId, nil
+	default:
+		logger.ConsumerLog.Warnf("unexpected status code returned by the NRF %d", res.StatusCode)
+		return prof, "", "", nil // Return error
+	}
 }
 
 func SendDeregisterNFInstance() (*models.ProblemDetails, error) {
@@ -91,21 +82,30 @@ func SendDeregisterNFInstance() (*models.ProblemDetails, error) {
 
 	res, err := client.NFInstanceIDDocumentApi.DeregisterNFInstance(context.Background(), ausfSelf.NfId)
 	if err == nil {
-		return nil, err
-	} else if res != nil {
-		defer func() {
-			if resCloseErr := res.Body.Close(); resCloseErr != nil {
-				logger.ConsumerLog.Errorf("NFInstanceIDDocumentApi response body cannot close: %+v", resCloseErr)
-			}
-		}()
-		if res.Status != err.Error() {
-			return nil, err
+		if res != nil && res.StatusCode == 204 {
+			defer res.Body.Close()
+			return nil, nil
 		}
-		problem := err.(openapi.GenericOpenAPIError).Model().(models.ProblemDetails)
-		return &problem, err
-	} else {
+	}
+	if res == nil {
 		return nil, openapi.ReportError("server no response")
 	}
+
+	defer func() {
+		if resCloseErr := res.Body.Close(); resCloseErr != nil {
+			logger.ConsumerLog.Errorf("NFInstanceIDDocumentApi response body cannot close: %+v", resCloseErr)
+		}
+	}()
+
+	if openapiErr, ok := err.(openapi.GenericOpenAPIError); ok {
+		if model := openapiErr.Model(); model != nil {
+			if problem, ok := model.(models.ProblemDetails); ok {
+				return &problem, nil
+			}
+		}
+	}
+
+	return nil, err
 }
 
 var SendUpdateNFInstance = func(patchItem []models.PatchItem) (nfProfile models.NfProfile, problemDetails *models.ProblemDetails, err error) {
