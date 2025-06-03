@@ -54,7 +54,7 @@ func fetchPlmnConfig() ([]models.PlmnId, error) {
 	resp, err := client.Get(pollingEndpoint)
 
 	if err != nil {
-		return nil, fmt.Errorf("HTTP GET failed: %w", err)
+		return nil, fmt.Errorf("HTTP GET %v failed: %w", pollingEndpoint, err)
 	}
 	defer resp.Body.Close()
 

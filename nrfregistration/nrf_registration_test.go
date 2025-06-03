@@ -48,7 +48,7 @@ func TestHandleNewConfig_EmptyConfig_DeregisterNF_StopTimer(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			KeepAliveTimer = time.NewTimer(60 * time.Second)
+			keepAliveTimer = time.NewTimer(60 * time.Second)
 			isRegisterNFCalled := false
 			isSendDeregisterNFInstanceCalled = false
 			originalSendDeregisterNFInstance := consumer.SendDeregisterNFInstance
@@ -56,8 +56,8 @@ func TestHandleNewConfig_EmptyConfig_DeregisterNF_StopTimer(t *testing.T) {
 			defer func() {
 				consumer.SendDeregisterNFInstance = originalSendDeregisterNFInstance
 				registerNF = originalRegisterNF
-				if KeepAliveTimer != nil {
-					KeepAliveTimer.Stop()
+				if keepAliveTimer != nil {
+					keepAliveTimer.Stop()
 				}
 			}()
 
@@ -69,8 +69,8 @@ func TestHandleNewConfig_EmptyConfig_DeregisterNF_StopTimer(t *testing.T) {
 
 			HandleNewConfig([]models.PlmnId{})
 
-			if KeepAliveTimer != nil {
-				t.Errorf("expected KeepAliveTimer to be nil after stopKeepAliveTimer")
+			if keepAliveTimer != nil {
+				t.Errorf("expected keepAliveTimer to be nil after stopKeepAliveTimer")
 			}
 
 			if !isSendDeregisterNFInstanceCalled {
@@ -85,12 +85,35 @@ func TestHandleNewConfig_EmptyConfig_DeregisterNF_StopTimer(t *testing.T) {
 	}
 }
 
-func TestHandleNewConfig_ConfigChanged_registerNFFails(t *testing.T) {
+func TestHandleNewConfig_ConfigChanged_RegisterNFSuccess_StartTimer(t *testing.T) {
 	originalSendRegisterNFInstance := consumer.SendRegisterNFInstance
 	defer func() {
 		consumer.SendRegisterNFInstance = originalSendRegisterNFInstance
-		if KeepAliveTimer != nil {
-			KeepAliveTimer.Stop()
+		if keepAliveTimer != nil {
+			keepAliveTimer.Stop()
+		}
+	}()
+
+	consumer.SendRegisterNFInstance = func(nrfUri string, nfInstanceId string, profile models.NfProfile) (models.NfProfile, string, string, error) {
+		profile.HeartBeatTimer = 60
+		return profile, "", "", nil
+	}
+
+	HandleNewConfig([]models.PlmnId{{Mcc: "001", Mnc: "01"}})
+	time.Sleep(1 * time.Second)
+
+	if keepAliveTimer == nil {
+		t.Error("expected keepAliveTimer to be initialized by startKeepAliveTimer")
+	}
+
+}
+
+func TestHandleNewConfig_ConfigChanged_RegisterNFFails(t *testing.T) {
+	originalSendRegisterNFInstance := consumer.SendRegisterNFInstance
+	defer func() {
+		consumer.SendRegisterNFInstance = originalSendRegisterNFInstance
+		if keepAliveTimer != nil {
+			keepAliveTimer.Stop()
 		}
 	}()
 
@@ -101,8 +124,7 @@ func TestHandleNewConfig_ConfigChanged_registerNFFails(t *testing.T) {
 
 	// Initial call: should start first registerNF
 	HandleNewConfig([]models.PlmnId{{Mcc: "001", Mnc: "01"}})
-
-	time.Sleep(3 * time.Second) // give registerNF a chance to run
+	time.Sleep(2 * time.Second)
 
 	// Save old context cancel
 	registerCtxMutex.Lock()
@@ -116,8 +138,7 @@ func TestHandleNewConfig_ConfigChanged_registerNFFails(t *testing.T) {
 
 	// Second config update: should cancel previous context and start a new one
 	HandleNewConfig([]models.PlmnId{{Mcc: "001", Mnc: "02"}})
-
-	time.Sleep(2 * time.Second) // give registerNF and cancel time
+	time.Sleep(2 * time.Second)
 
 	select {
 	case <-oldContext.Done():
@@ -132,37 +153,72 @@ func TestHandleNewConfig_ConfigChanged_registerNFFails(t *testing.T) {
 	default:
 		// expected
 	}
-
 }
 
-func TestHandleNewConfig_ConfigChanged_registerNFSuccess_startsTimer(t *testing.T) {
+func TestHeartbeatNF_Success(t *testing.T) {
+	keepAliveTimer = time.NewTimer(60 * time.Second)
+	calledRegister := false
 	originalSendRegisterNFInstance := consumer.SendRegisterNFInstance
+	originalSendUpdateNFInstance := consumer.SendUpdateNFInstance
 	defer func() {
 		consumer.SendRegisterNFInstance = originalSendRegisterNFInstance
-		if KeepAliveTimer != nil {
-			KeepAliveTimer.Stop()
+		consumer.SendUpdateNFInstance = originalSendUpdateNFInstance
+		if keepAliveTimer != nil {
+			keepAliveTimer.Stop()
 		}
 	}()
 
+	consumer.SendUpdateNFInstance = func(patchItem []models.PatchItem) (models.NfProfile, *models.ProblemDetails, error) {
+		return models.NfProfile{}, nil, nil
+	}
+
 	consumer.SendRegisterNFInstance = func(nrfUri string, nfInstanceId string, profile models.NfProfile) (models.NfProfile, string, string, error) {
 		profile.HeartBeatTimer = 60
+		calledRegister = true
 		return profile, "", "", nil
 	}
 
-	// Initial call: should start first registerNF
-	HandleNewConfig([]models.PlmnId{{Mcc: "001", Mnc: "01"}})
+	heartbeatNF()
 
-	time.Sleep(3 * time.Second) // give registerNF a chance to run
-
-	select {
-	case <-registerCtx.Done(): // correct this
-		//expected
-	default:
-		t.Error("expected context to be running")
+	if calledRegister {
+		t.Errorf("expected registerNF to be called on error")
 	}
 
-	if KeepAliveTimer == nil {
-		t.Error("expected KeepAliveTimer to be initialized by startKeepAliveTimer")
+	if keepAliveTimer == nil {
+		t.Error("expected keepAliveTimer to be initialized by startKeepAliveTimer")
+	}
+}
+
+func TestHeartbeatNF_RegistersOnError(t *testing.T) {
+	keepAliveTimer = time.NewTimer(60 * time.Second)
+	calledRegister := false
+	originalSendRegisterNFInstance := consumer.SendRegisterNFInstance
+	originalSendUpdateNFInstance := consumer.SendUpdateNFInstance
+	defer func() {
+		consumer.SendRegisterNFInstance = originalSendRegisterNFInstance
+		consumer.SendUpdateNFInstance = originalSendUpdateNFInstance
+		if keepAliveTimer != nil {
+			keepAliveTimer.Stop()
+		}
+	}()
+
+	consumer.SendUpdateNFInstance = func(patchItem []models.PatchItem) (models.NfProfile, *models.ProblemDetails, error) {
+		return models.NfProfile{}, nil, errors.New("mock error")
 	}
 
+	consumer.SendRegisterNFInstance = func(nrfUri string, nfInstanceId string, profile models.NfProfile) (models.NfProfile, string, string, error) {
+		profile.HeartBeatTimer = 60
+		calledRegister = true
+		return profile, "", "", nil
+	}
+
+	heartbeatNF()
+
+	if !calledRegister {
+		t.Errorf("expected registerNF to be called on error")
+	}
+
+	if keepAliveTimer == nil {
+		t.Error("expected keepAliveTimer to be initialized by startKeepAliveTimer")
+	}
 }
