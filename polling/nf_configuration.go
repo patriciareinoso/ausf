@@ -6,7 +6,6 @@
 package polling
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,8 +49,7 @@ func PollNetworkConfig() {
 func fetchPlmnConfig() ([]models.PlmnId, error) {
 	pollingEndpoint := factory.AusfConfig.Configuration.WebuiUri + POLLING_PATH
 
-	client := getHttpClient()
-	resp, err := client.Get(pollingEndpoint)
+	resp, err := http.Get(pollingEndpoint)
 
 	if err != nil {
 		return nil, fmt.Errorf("HTTP GET %v failed: %w", pollingEndpoint, err)
@@ -69,15 +67,6 @@ func fetchPlmnConfig() ([]models.PlmnId, error) {
 	}
 
 	return config, nil
-}
-
-func getHttpClient() *http.Client {
-	customTransport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-	}
-	return &http.Client{Transport: customTransport}
 }
 
 func handlePolledPlmnConfig(context *context.AUSFContext, newPlmnConfig []models.PlmnId) {
